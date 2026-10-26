@@ -1,0 +1,61 @@
+# Rebuilds board.json from results/, for when a maintainer removes or edits a
+# result, and commits it if it changed.
+#
+# No loop: this workflow pushes with the job's own token, and GitHub starts no
+# workflow for such pushes. board.json is also outside results/, so even a push
+# made another way would not start this workflow again.
+
+name: Rebuild board
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "results/**"
+
+permissions:
+  contents: write
+
+# A waiting rebuild may be replaced by a newer one, which rebuilds everything
+# anyway. Accept runs have no group, and either kind retries from the tip.
+concurrency:
+  group: board-rebuild
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the newest board
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Rebuild, commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            python3 scripts/accept.py rebuild .
+            git add board.json
+            if git diff --cached --quiet; then
+              echo "board.json is up to date."
+              exit 0
+            fi
+            git commit -q -m "Rebuild board.json"
+            if git push -q origin "HEAD:$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+            echo "The push was refused, so starting again from the newest board."
+            sleep $((attempt * 3))
+            git fetch -q origin "$GITHUB_REF_NAME"
+            git reset -q --hard "origin/$GITHUB_REF_NAME"
+          done
+          echo "Could not push after 5 tries." >&2
+          exit 1
