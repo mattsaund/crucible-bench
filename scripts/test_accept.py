@@ -528,6 +528,15 @@ class DedupeTest(BoardCase):
         results, _ = accept.load_results(self.root)
         self.assertEqual([e["id"] for e in accept.board_entries(results[::-1])], [11, 13, 10, 12])
 
+    def test_results_with_every_skill_come_before_the_rest(self) -> None:
+        every = {bench: {"n": 50, "correct": 10} for bench in accept.BENCHMARKS}
+        self.post(valid_result(benchmarks=every), number=20)
+        one = valid_result(benchmarks={"hellaswag": {"n": 50, "correct": 50}})
+        one["model"]["sha256"] = "1" * 64
+        self.post(one, number=21)
+        self.assertEqual(self.board_ids(), [20, 21])
+        self.assertEqual([e["overall"] for e in self.board()["entries"]], [0.2, 1.0])
+
 
 class RebuildTest(BoardCase):
     def test_rebuild_skips_and_reports_files_that_no_longer_pass(self) -> None:

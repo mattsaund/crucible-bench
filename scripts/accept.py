@@ -426,14 +426,16 @@ def board_entry(stored: dict[str, Any]) -> dict[str, Any]:
 
 
 def board_entries(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The newest result for each dedupe key, highest overall first (ties: lower id first)."""
+    """The newest result for each dedupe key. Those with every skill come first, since
+    an overall of fewer skills is not the same measure; then highest overall first
+    (ties: lower id first)."""
     newest: dict[tuple[str, str, str], dict[str, Any]] = {}
     for stored in results:
         key = dedupe_key(stored)
         if key not in newest or stored["posted"]["issue"] > newest[key]["posted"]["issue"]:
             newest[key] = stored
     entries = [board_entry(stored) for stored in newest.values()]
-    entries.sort(key=lambda entry: (-entry["overall"], entry["id"]))
+    entries.sort(key=lambda entry: (len(entry["skills"]) < len(SKILLS), -entry["overall"], entry["id"]))
     return entries
 
 

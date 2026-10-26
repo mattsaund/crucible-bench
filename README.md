@@ -170,7 +170,7 @@ Every Crucible reads <https://raw.githubusercontent.com/mattsaund/crucible-bench
 |---|---|
 | `suite` | `"crucible-bench-1"` |
 | `updated` | when the entries last changed, in UTC |
-| `entries` | the results on the board, highest `overall` first (on a tie, the lower `id` first) |
+| `entries` | the results on the board: those with all seven skills first, then the rest, each highest `overall` first (on a tie, the lower `id` first) |
 
 Each entry is a stored result, which is the result as posted plus `posted`, with four keys added:
 
