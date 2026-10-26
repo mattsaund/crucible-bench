@@ -360,7 +360,7 @@ class JsonTextTest(BoardCase):
             ("Infinity", '"gen_tps": 38.1', '"gen_tps": Infinity', "uses Infinity"),
             ("overflowing float", '"memory_gb": 40.2', '"memory_gb": 1e400', "too large"),
             ("huge integer", '"bytes": 32720880480', '"bytes": 327208804800000000000', "too large"),
-            ("repeated key", '"schema": 1', '"schema": 1, "schema": 1', "repeats the key `schema`"),
+            ("repeated key", '"schema": 1', '"schema": 1, "schema": 1', "repeats a key within one object"),
             ("control character", '"file": "flint-Q6_K.gguf"', '"file": "flint\\u0007-Q6_K.gguf"',
              "`model.file` must be a GGUF file name"),
             ("lone surrogate", '"file": "flint-Q6_K.gguf"', '"file": "flint\\ud800-Q6_K.gguf"',
@@ -427,9 +427,9 @@ class RuleTest(unittest.TestCase):
     def test_each_rule(self) -> None:
         cases = [
             # the whole result
-            ("unknown top-level key", changed("comment", "hi"), "The result has an unknown key `comment`."),
-            ("posted is not for posters", changed("posted", posted(7)), "unknown key `posted`"),
-            ("scores are never posted", changed("overall", 0.68), "unknown key `overall`"),
+            ("unknown top-level key", changed("comment", "hi"), "The result has an unknown key."),
+            ("posted is not for posters", changed("posted", posted(7)), "The result has an unknown key."),
+            ("scores are never posted", changed("overall", 0.68), "The result has an unknown key."),
             ("schema 2", changed("schema", 2), "`schema` must be 1"),
             ("schema as text", changed("schema", "1"), "`schema` must be 1"),
             ("schema as a float", changed("schema", 1.0), "`schema` must be 1"),
@@ -447,9 +447,9 @@ class RuleTest(unittest.TestCase):
             ("date with a newline", changed("date", "2026-10-26\n"), "`date` must be a date"),
             # model: names only, never words
             ("model not an object", changed("model", "flint.gguf"), "`model` must be a JSON object"),
-            ("unknown model key", changed("model.license", "MIT"), "`model` has an unknown key `license`."),
+            ("unknown model key", changed("model.license", "MIT"), "`model` has an unknown key."),
             ("the name inside a GGUF is free text", changed("model.name", "Recursive Flint"),
-             "`model` has an unknown key `name`."),
+             "`model` has an unknown key."),
             ("file in a folder", changed("model.file", "models/flint.gguf"), "`model.file` must be a GGUF file name"),
             ("windows path", changed("model.file", "C:\\models\\flint.gguf"), "`model.file` must be a GGUF file name"),
             ("empty file", changed("model.file", ""), "`model.file` must be a GGUF file name"),
@@ -492,7 +492,7 @@ class RuleTest(unittest.TestCase):
             ("quant with a space", changed("model.quant", "Q6_K M"), "`model.quant` must be a quantization name"),
             # settings
             ("settings not an object", changed("settings", []), "`settings` must be a JSON object"),
-            ("unknown setting", changed("settings.top_p", 0.9), "`settings` has an unknown key `top_p`."),
+            ("unknown setting", changed("settings.top_p", 0.9), "`settings` has an unknown key."),
             ("context as text", changed("settings.context", "8192"), "`settings.context` must be an integer"),
             ("context as a float", changed("settings.context", 8192.0), "`settings.context` must be an integer"),
             ("max_tokens as null", changed("settings.max_tokens", None), "`settings.max_tokens` must be an integer"),
@@ -501,9 +501,9 @@ class RuleTest(unittest.TestCase):
             ("unknown effort", changed("settings.effort", "max"), "`settings.effort` must be default, low, medium"),
             # hardware: what kind and how much, never a name
             ("hardware not an object", changed("hardware", "RTX 4070"), "`hardware` must be a JSON object"),
-            ("unknown hardware key", changed("hardware.cpu", "Ryzen"), "`hardware` has an unknown key `cpu`."),
+            ("unknown hardware key", changed("hardware.cpu", "Ryzen"), "`hardware` has an unknown key."),
             ("GPU names are words", changed("hardware.gpus", ["NVIDIA GeForce RTX 4070"]),
-             "`hardware` has an unknown key `gpus`."),
+             "`hardware` has an unknown key."),
             ("backend in lower case", changed("hardware.backend", "cuda"),
              "`hardware.backend` must be CPU, CUDA, Metal, Vulkan, ROCm or SYCL."),
             ("backend of another kind", changed("hardware.backend", "OpenCL"), "`hardware.backend` must be CPU"),
@@ -517,7 +517,7 @@ class RuleTest(unittest.TestCase):
             ("negative memory", changed("hardware.memory_gb", -1), "`hardware.memory_gb` must be a non-negative"),
             # speed and seconds
             ("speed not an object", changed("speed", 38.1), "`speed` must be a JSON object"),
-            ("unknown speed key", changed("speed.tps", 1), "`speed` has an unknown key `tps`."),
+            ("unknown speed key", changed("speed.tps", 1), "`speed` has an unknown key."),
             ("negative prompt speed", changed("speed.prompt_tps", -1), "`speed.prompt_tps` must be a non-negative"),
             ("generation speed as text", changed("speed.gen_tps", "fast"), "`speed.gen_tps` must be a non-negative"),
             ("negative seconds", changed("seconds", -5), "`seconds` must be a non-negative integer"),
@@ -526,10 +526,10 @@ class RuleTest(unittest.TestCase):
             ("benchmarks not an object", changed("benchmarks", []), "`benchmarks` must be a JSON object"),
             ("no benchmarks", changed("benchmarks", {}), "`benchmarks` must hold at least one benchmark"),
             ("unknown benchmark", changed("benchmarks.mmlu", {"n": 50, "correct": 1}),
-             "`benchmarks` has an unknown benchmark `mmlu`."),
+             "`benchmarks` has an unknown benchmark."),
             ("entry not an object", changed("benchmarks.gsm8k", 44), "`benchmarks.gsm8k` must be a JSON object"),
             ("score is never posted", changed("benchmarks.gsm8k.score", 0.88),
-             "`benchmarks.gsm8k` has an unknown key `score`."),
+             "`benchmarks.gsm8k` has an unknown key."),
             ("missing correct", changed("benchmarks.gsm8k.correct", REMOVE), "`benchmarks.gsm8k` is missing `correct`."),
             ("missing n", changed("benchmarks.gsm8k.n", REMOVE), "`benchmarks.gsm8k` is missing `n`."),
             ("n as text", changed("benchmarks.gsm8k.n", "50"), "`benchmarks.gsm8k.n` must be an integer"),
@@ -564,7 +564,13 @@ class RuleTest(unittest.TestCase):
                 with self.assertRaises(accept.Invalid):
                     accept.validate(changed(path, text + " and more"))
 
-    def test_unsafe_names_are_not_repeated(self) -> None:
+    def test_nothing_posted_is_repeated(self) -> None:
+        # Not even a plain word: a key is the one place a result could carry one.
+        for key in ("@everyone", "buy_my_course", "hello"):
+            with self.subTest(key):
+                with self.assertRaises(accept.Invalid) as caught:
+                    accept.validate(changed(key, 1))
+                self.assertEqual(str(caught.exception), "The result has an unknown key.")
         self.assert_invalid(changed("@everyone", 1), "The result has an unknown key.")
         self.assert_invalid(changed("benchmarks.<b>x</b>", {"n": 50, "correct": 1}),
                             "`benchmarks` has an unknown benchmark.")

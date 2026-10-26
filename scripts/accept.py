@@ -26,8 +26,8 @@ The board takes benchmark results and nothing else. Every string in a result
 is an identifier of a fixed shape, the model's names come from Hugging Face,
 and the issue a person opened is rewritten to the result alone (or emptied).
 Its text is only ever parsed as JSON and checked: nothing in it is run, and
-messages repeat only short names made of safe characters, so a comment can
-never be made to mention or link anyone.
+no message repeats any of it, so a comment the board writes can never be made
+to say a word, mention or link anyone.
 
 Standard library only, Python 3.10 or newer.
 """
@@ -108,7 +108,6 @@ LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?")
 URL_RE = re.compile(r"https://[!-~]{1,300}")
 TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]{1,100}")
-SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 FENCE_RE = re.compile(r"(`{3,})[ \t]*json[ \t]*", re.IGNORECASE | re.ASCII)
 RESULT_NAME_RE = re.compile(r"[1-9][0-9]{0,15}")
 
@@ -143,19 +142,11 @@ def item_count(size: str, bench: str) -> int:
 # Strict JSON ----------------------------------------------------------------
 
 
-def _shown(key: object) -> str:
-    """The key in backticks after a space, when it is safe to repeat; else nothing."""
-    if isinstance(key, str) and SAFE_NAME_RE.fullmatch(key):
-        return f" `{key}`"
-    return ""
-
-
 def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     obj: dict[str, Any] = {}
     for key, value in pairs:
         if key in obj:
-            shown = _shown(key)
-            raise Invalid(f"The JSON repeats {'the key' + shown if shown else 'a key'} within one object.")
+            raise Invalid("The JSON repeats a key within one object.")
         obj[key] = value
     return obj
 
@@ -216,7 +207,7 @@ def _check_object(value: object, where: str) -> None:
 def _check_keys(obj: dict[str, Any], where: str, allowed: tuple[str, ...], required: tuple[str, ...]) -> None:
     for key in obj:
         if key not in allowed:
-            raise Invalid(f"{where} has an unknown key{_shown(key)}.")
+            raise Invalid(f"{where} has an unknown key.")
     for key in required:
         if key not in obj:
             raise Invalid(f"{where} is missing `{key}`.")
@@ -293,7 +284,7 @@ def _check_benchmarks(benchmarks: object, size: str) -> None:
     _check_object(benchmarks, "`benchmarks`")
     for bench in benchmarks:
         if bench not in BENCHMARKS:
-            raise Invalid(f"`benchmarks` has an unknown benchmark{_shown(bench)}.")
+            raise Invalid("`benchmarks` has an unknown benchmark.")
     if not benchmarks:
         raise Invalid("`benchmarks` must hold at least one benchmark.")
     for bench, (name, _skill, _rows) in BENCHMARKS.items():

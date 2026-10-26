@@ -9,7 +9,7 @@ The shared results board for the Bench tab in [Crucible](https://github.com/matt
 3. If it passes, the Action saves it as `results/<issue number>.json`, rebuilds `board.json`, comments with your scores and closes the issue.
 4. If it does not, the Action comments with the reason, labels the issue `not accepted` and closes it.
 
-The board takes results and nothing else. Once the Action has decided, it rewrites the issue's title and body to the result alone, or empties them when there is no result to keep, and the issue stays closed and locked. An edit to it afterwards is undone. An issue that is not a result is closed the same way, with a pointer to [Crucible's issues](https://github.com/mattsaund/Crucible/issues), where questions and bug reports go. Only newly opened issues are checked, so to fix a result, post it again.
+The board takes results and nothing else. Once the Action has decided, it rewrites the issue's title and body to the result alone, or empties them when there is no result to keep, and the issue stays closed and locked. An edit to it afterwards is undone. An issue that is not a result is closed the same way, with a pointer to [Crucible's issues](https://github.com/mattsaund/Crucible/issues), where questions and bug reports go. Comments added before the lock are removed, and a pull request is emptied, closed and locked as it opens. Only newly opened issues are checked, so to fix a result, post it again.
 
 A result issue has a line holding only `<!-- crucible-bench -->`, followed by a `` ```json `` block with the result. Crucible writes both. Everything in a result is public, and so is the account that posts it.
 

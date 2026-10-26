@@ -1,0 +1,41 @@
+# The board takes results, as issues from Crucible's Bench tab, and changes from
+# its maintainers. A pull request from anybody else is locked, emptied and
+# closed as it opens, and again when it is edited or reopened, so nothing
+# posted here stays in words.
+#
+# pull_request_target runs with this repository's token, which is safe only
+# because nothing of the pull request is checked out or run: the one thing
+# taken from it is its number.
+name: Pull requests
+
+on:
+  pull_request_target:
+    types: [opened, reopened, edited]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  close:
+    if: ${{ !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Lock the conversation
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR" --jq .locked)" != "true" ]; then
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/issues/$PR/lock" -f lock_reason=resolved --silent
+          fi
+
+      - name: Say where things go
+        if: github.event.action == 'opened'
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --silent \
+            -f body="This board takes only results, posted from Crucible's Bench tab. Anything else goes to https://github.com/mattsaund/Crucible/issues."
+
+      - name: Empty and close
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR" -f title="Not taken" -f body="" -f state=closed --silent

@@ -106,6 +106,18 @@ jobs:
       - name: Rewrite and close
         run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --input "$RUNNER_TEMP/accept/issue.json" --silent
 
+      # Anything somebody said in the seconds before the lock went on. The
+      # board's own comment stays. Only the comments' numbers reach the shell.
+      - name: Remove other comments
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" \
+            --jq '.[] | select(.user.login != "github-actions[bot]") | .id' |
+          while read -r id; do
+            case "$id" in '' | *[!0-9]*) continue ;; esac
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$id" --silent \
+              || echo "Could not remove comment $id." >&2
+          done
+
   # Locking stops comments, not necessarily edits by the issue's author. An
   # edit to an issue the board has closed is undone, and one made while the
   # accept run is still deciding is overwritten by that run.
