@@ -1,0 +1,15 @@
+# What Crucible opens in a browser to post a result when GitHub's command line
+# is not signed in. With blank issues off, a prefilled body alone may not
+# survive the way to the form; a field of an issue form is filled from the URL
+# by its id, so Crucible names this form and fills `result`.
+name: Result
+description: A result from Crucible's Bench tab.
+title: Result
+body:
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: Crucible fills this in.
+    validations:
+      required: true

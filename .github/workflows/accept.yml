@@ -1,8 +1,12 @@
 # Checks a result posted as an issue and, if it passes, adds it to board.json.
+# Whatever the answer, the issue then holds the result and nothing else: its
+# title and body are rewritten to the result (or emptied, when it holds none),
+# and it is closed and locked.
 #
 # The issue's title and body are written by whoever opened it. They never
 # appear in a shell script here: accept.py reads them from the event file, and
-# the only thing the shell gets from the event is the issue number.
+# the only thing the shell gets from the event is the issue number. What the
+# issue becomes is written by accept.py to a file that the API is handed.
 #
 # No concurrency group: GitHub keeps one waiting run per group and cancels the
 # rest, which would drop results posted close together. Runs that race instead
@@ -12,7 +16,7 @@ name: Accept result
 
 on:
   issues:
-    types: [opened]
+    types: [opened, edited]
 
 permissions:
   contents: write
@@ -24,11 +28,21 @@ defaults:
 
 jobs:
   accept:
+    if: github.event.action == 'opened'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       ISSUE: ${{ github.event.issue.number }}
+      GH_TOKEN: ${{ github.token }}
     steps:
+      # First, so nobody can add a comment while the result is checked. A run
+      # that is run again finds the issue locked already.
+      - name: Lock the conversation
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq .locked)" != "true" ]; then
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/issues/$ISSUE/lock" -f lock_reason=resolved --silent
+          fi
+
       - name: Check out the newest board
         uses: actions/checkout@v7
         with:
@@ -36,13 +50,15 @@ jobs:
           # waited in the queue builds on the results accepted before it.
           ref: ${{ github.ref_name }}
 
+      # Asks Hugging Face about the model file too. When Hugging Face does not
+      # answer, this fails rather than turn a good result away.
       - name: Check the result
         id: check
         run: |
           python3 scripts/accept.py accept "$GITHUB_EVENT_PATH" . "$RUNNER_TEMP/accept"
           status=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["status"])' "$RUNNER_TEMP/accept/decision.json")
           case "$status" in
-            accepted | rejected | ignored) echo "status=$status" >> "$GITHUB_OUTPUT" ;;
+            accepted | rejected | other) echo "status=$status" >> "$GITHUB_OUTPUT" ;;
             *) echo "Unexpected status." >&2; exit 1 ;;
           esac
 
@@ -75,24 +91,40 @@ jobs:
           exit 1
 
       - name: Comment
-        if: steps.check.outputs.status == 'accepted' || steps.check.outputs.status == 'rejected'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/accept/comment.md"
 
-      - name: Close as completed
-        if: steps.check.outputs.status == 'accepted'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason completed
-
-      - name: Label and close as not planned
+      - name: Label
         if: steps.check.outputs.status == 'rejected'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           gh label create "not accepted" --repo "$GITHUB_REPOSITORY" --color B60205 \
             --description "The posted result did not pass the checks" || true
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label "not accepted" \
             || echo "Could not add the label." >&2
-          gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason "not planned"
+
+      # The title and body become the result alone, or nothing, and the issue
+      # is closed: completed for a result on the board, not planned otherwise.
+      - name: Rewrite and close
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --input "$RUNNER_TEMP/accept/issue.json" --silent
+
+  # Locking stops comments, not necessarily edits by the issue's author. An
+  # edit to an issue the board has closed is undone, and one made while the
+  # accept run is still deciding is overwritten by that run.
+  restore:
+    if: github.event.action == 'edited'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ISSUE: ${{ github.event.issue.number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the newest board
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Put back what the board left
+        run: |
+          python3 scripts/accept.py restore "$GITHUB_EVENT_PATH" . "$RUNNER_TEMP/restore"
+          if [ -f "$RUNNER_TEMP/restore/issue.json" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --input "$RUNNER_TEMP/restore/issue.json" --silent
+          fi

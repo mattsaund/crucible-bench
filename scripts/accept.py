@@ -2,21 +2,32 @@
 """Check results posted to the crucible-bench board, and build board.json.
 
     python3 scripts/accept.py accept <event.json> <repo_root> <out_dir>
+    python3 scripts/accept.py restore <event.json> <repo_root> <out_dir>
     python3 scripts/accept.py rebuild <repo_root>
 
-`accept` reads the payload of a GitHub `issues` event. An issue whose body has
-no `<!-- crucible-bench -->` line is ignored. Otherwise the first ```json block
-after that line is parsed and checked against the crucible-bench-1 rules (see
-README.md). A result that passes is stored as results/<issue number>.json and
-board.json is rebuilt. <out_dir>/decision.json and <out_dir>/comment.md are
-always written, for the workflow to act on.
+`accept` reads the payload of a GitHub `issues` event for a new issue. An issue
+whose body has no `<!-- crucible-bench -->` line is not a result. Otherwise the
+first ```json block after that line is parsed and checked against the
+crucible-bench-1 rules (see README.md), and then against Hugging Face: the
+model file must be public there, with the SHA-256 and size the result gives. A
+result that passes is stored as results/<issue number>.json and board.json is
+rebuilt. Three files are always written to <out_dir> for the workflow to act
+on: decision.json, comment.md, and issue.json, which is what the issue becomes
+as it is closed (the result alone, or nothing).
+
+`restore` reads the payload of an `edited` event. When the author of an issue
+the board has closed edits it, <out_dir>/issue.json is written with what the
+board left there, to be put back.
 
 `rebuild` makes board.json again from results/*.json, skipping (and naming)
 any file that no longer passes.
 
-Whoever opens an issue writes its text. That text is only ever parsed as JSON
-and checked: nothing in it is run, and messages repeat only short names made
-of safe characters, so a comment can never be made to mention or link anyone.
+The board takes benchmark results and nothing else. Every string in a result
+is an identifier of a fixed shape, the model's names come from Hugging Face,
+and the issue a person opened is rewritten to the result alone (or emptied).
+Its text is only ever parsed as JSON and checked: nothing in it is run, and
+messages repeat only short names made of safe characters, so a comment can
+never be made to mention or link anyone.
 
 Standard library only, Python 3.10 or newer.
 """
@@ -25,12 +36,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import http.client
 import json
 import math
 import os
 import re
 import sys
-import unicodedata
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -38,6 +53,10 @@ from typing import Any
 SUITE = "crucible-bench-1"
 MARKER = "<!-- crucible-bench -->"
 FALLBACK_REPO_URL = "https://github.com/mattsaund/crucible-bench"
+CRUCIBLE_ISSUES = "https://github.com/mattsaund/Crucible/issues"
+REJECTED_LABEL = "not accepted"
+NOT_ACCEPTED_TITLE = "Not accepted"
+NOT_A_RESULT_TITLE = "Not a result"
 
 # id: (name, skill, rows in the dataset split)
 BENCHMARKS: dict[str, tuple[str, str, int]] = {
@@ -55,6 +74,8 @@ SKILLS = ("knowledge", "reasoning", "math", "code", "instructions", "commonsense
 # Items per benchmark: min(limit, rows), or every row when the limit is None.
 SIZES: dict[str, int | None] = {"quick": 50, "standard": 200, "full": None}
 EFFORTS = ("default", "low", "medium", "high")
+BACKENDS = ("CPU", "CUDA", "Metal", "Vulkan", "ROCm", "SYCL")
+MAX_GPUS = 64
 
 # Every Crucible reads board.json, so integers stay within what JavaScript
 # (and any 64-bit reader) holds exactly.
@@ -62,10 +83,10 @@ MAX_INT = 2**53 - 1
 
 TOP_REQUIRED = ("schema", "suite", "size", "crucible", "llama", "date", "model", "settings", "benchmarks")
 TOP_OPTIONAL = ("hardware", "speed", "seconds")
-MODEL_REQUIRED = ("file", "sha256", "bytes")
-MODEL_OPTIONAL = ("name", "arch", "params", "quant", "repo")
+MODEL_REQUIRED = ("file", "sha256", "bytes", "repo")
+MODEL_OPTIONAL = ("arch", "params", "quant")
 SETTINGS_KEYS = ("context", "max_tokens", "temperature", "effort")
-HARDWARE_KEYS = ("backend", "gpus", "memory_gb")
+HARDWARE_KEYS = ("backend", "gpu_count", "memory_gb")
 SPEED_KEYS = ("prompt_tps", "gen_tps")
 BENCH_KEYS = ("n", "correct")
 POSTED_KEYS = ("issue", "user", "url", "at")
@@ -75,6 +96,14 @@ LLAMA_RE = re.compile(r"b[0-9]{1,9}")
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+# The other strings a result holds are names of a fixed shape, never free text:
+# a GGUF file's name, an architecture as llama.cpp spells it, a quantization.
+FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,194}\.gguf")
+SPLIT_RE = re.compile(r"(.+)-([0-9]{5})-of-([0-9]{5})\.gguf")
+ARCH_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,31}")
+QUANT_RE = re.compile(
+    r"(?:UD-)?(?:I?Q[1-8](?:_(?:[0-9]|K|M|S|L|P|NL|XS|XL|XXS|XXL)){0,3}|TQ[12]_0|B?F16|F32|MXFP4(?:_MOE)?)"
+)
 LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?")
 URL_RE = re.compile(r"https://[!-~]{1,300}")
 TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
@@ -83,9 +112,25 @@ SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 FENCE_RE = re.compile(r"(`{3,})[ \t]*json[ \t]*", re.IGNORECASE | re.ASCII)
 RESULT_NAME_RE = re.compile(r"[1-9][0-9]{0,15}")
 
+# Hugging Face's API, asked only for what the check needs: the name it gives
+# the repository, whether that is public, and every file with its LFS record,
+# which holds the file's SHA-256 (the LFS object's id) and its size.
+HUB_API = "https://huggingface.co/api/models/"
+HUB_QUERY = "?blobs=true&expand%5B%5D=siblings&expand%5B%5D=private&expand%5B%5D=disabled"
+HUB_TIMEOUT = 30
+# A longer reply is a repository of tens of thousands of files, which is no
+# model anybody runs.
+HUB_LIMIT = 32 * 1024 * 1024
+# Seconds between tries when Hugging Face does not answer.
+HUB_WAITS = (5, 15)
+
 
 class Invalid(Exception):
     """A result that breaks a rule. The message is one sentence."""
+
+
+class HubDown(Exception):
+    """Hugging Face did not answer. Not the poster's doing, so the run fails and can be run again."""
 
 
 def item_count(size: str, bench: str) -> int:
@@ -177,16 +222,6 @@ def _check_keys(obj: dict[str, Any], where: str, allowed: tuple[str, ...], requi
             raise Invalid(f"{where} is missing `{key}`.")
 
 
-def _check_text(value: object, where: str, limit: int) -> None:
-    if not isinstance(value, str):
-        raise Invalid(f"{where} must be text.")
-    if len(value) > limit:
-        raise Invalid(f"{where} is longer than {limit} characters.")
-    # Control characters, and halves of surrogate pairs that no UTF-8 text can hold.
-    if any(unicodedata.category(ch) in ("Cc", "Cs") for ch in value):
-        raise Invalid(f"{where} contains a character that is not allowed.")
-
-
 def _check_pattern(value: object, pattern: re.Pattern[str], message: str) -> None:
     if not (isinstance(value, str) and pattern.fullmatch(value)):
         raise Invalid(message)
@@ -204,22 +239,21 @@ def _check_date(value: object) -> None:
 def _check_model(model: object) -> None:
     _check_object(model, "`model`")
     _check_keys(model, "`model`", MODEL_REQUIRED + MODEL_OPTIONAL, MODEL_REQUIRED)
-    file = model["file"]
-    _check_text(file, "`model.file`", 200)
-    if not file or "/" in file or "\\" in file:
-        raise Invalid("`model.file` must be a bare file name, with no slashes.")
+    _check_pattern(model["file"], FILE_RE, "`model.file` must be a GGUF file name of letters, digits and ._+- only.")
+    # A split GGUF is run, and hashed, from its first part.
+    split = SPLIT_RE.fullmatch(model["file"])
+    if split and (split.group(2) != "00001" or split.group(3) == "00000"):
+        raise Invalid("`model.file` must be the first part of a split GGUF, like x-00001-of-00003.gguf.")
     _check_pattern(model["sha256"], SHA256_RE, "`model.sha256` must be 64 lowercase hex characters.")
     if not (_is_int(model["bytes"]) and model["bytes"] > 0):
         raise Invalid("`model.bytes` must be a positive integer.")
-    for key in ("name", "arch"):
-        if key in model:
-            _check_text(model[key], f"`model.{key}`", 100)
+    _check_pattern(model["repo"], REPO_RE, "`model.repo` must be a Hugging Face repository like owner/name.")
+    if "arch" in model:
+        _check_pattern(model["arch"], ARCH_RE, "`model.arch` must be an architecture name like llama or gpt-oss.")
     if "params" in model and not (_is_int(model["params"]) and model["params"] >= 0):
         raise Invalid("`model.params` must be a non-negative integer.")
     if "quant" in model:
-        _check_text(model["quant"], "`model.quant`", 32)
-    if "repo" in model:
-        _check_pattern(model["repo"], REPO_RE, "`model.repo` must look like owner/name.")
+        _check_pattern(model["quant"], QUANT_RE, "`model.quant` must be a quantization name like Q4_K_M or MXFP4.")
 
 
 def _check_settings(settings: object) -> None:
@@ -238,16 +272,13 @@ def _check_settings(settings: object) -> None:
 def _check_hardware(hardware: object) -> None:
     _check_object(hardware, "`hardware`")
     _check_keys(hardware, "`hardware`", HARDWARE_KEYS, ())
-    if "backend" in hardware:
-        _check_text(hardware["backend"], "`hardware.backend`", 20)
-    if "gpus" in hardware:
-        gpus = hardware["gpus"]
-        if not (isinstance(gpus, list) and len(gpus) <= 8):
-            raise Invalid("`hardware.gpus` must be a list of at most 8 names.")
-        for gpu in gpus:
-            _check_text(gpu, "A name in `hardware.gpus`", 80)
-    if "memory_gb" in hardware and not _is_number(hardware["memory_gb"]):
-        raise Invalid("`hardware.memory_gb` must be a number.")
+    backend = hardware.get("backend")
+    if "backend" in hardware and not (isinstance(backend, str) and backend in BACKENDS):
+        raise Invalid(f"`hardware.backend` must be {', '.join(BACKENDS[:-1])} or {BACKENDS[-1]}.")
+    if "gpu_count" in hardware and not (_is_int(hardware["gpu_count"]) and 0 <= hardware["gpu_count"] <= MAX_GPUS):
+        raise Invalid(f"`hardware.gpu_count` must be an integer from 0 to {MAX_GPUS}.")
+    if "memory_gb" in hardware and not (_is_number(hardware["memory_gb"]) and hardware["memory_gb"] >= 0):
+        raise Invalid("`hardware.memory_gb` must be a non-negative number.")
 
 
 def _check_speed(speed: object) -> None:
@@ -296,7 +327,7 @@ def validate(result: object, *, stored: bool = False) -> None:
     """Raise Invalid, with one sentence, on the first rule that `result` breaks.
 
     A stored result (results/<n>.json) must also carry `posted`; a posted one
-    must not.
+    must not. Hugging Face is not asked here: see check_hub.
     """
     _check_object(result, "The result")
     extra = ("posted",) if stored else ()
@@ -322,6 +353,110 @@ def validate(result: object, *, stored: bool = False) -> None:
     _check_benchmarks(result["benchmarks"], size)
     if stored:
         _check_posted(result["posted"])
+
+
+# Hugging Face ---------------------------------------------------------------
+# The model must be a file anybody can fetch from Hugging Face, the very bytes
+# that were run. That also makes its names Hugging Face's: the repository, the
+# file and its size are checked there, not taken from whoever posted.
+
+
+def _hub_get(url: str) -> tuple[int, bytes]:
+    """One GET of Hugging Face's API: the status and the body, or status 0 when nothing answered."""
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "crucible-bench"})
+    try:
+        with urllib.request.urlopen(request, timeout=HUB_TIMEOUT) as response:
+            return response.status, response.read(HUB_LIMIT + 1)
+    except urllib.error.HTTPError as err:
+        err.close()
+        return err.code, b""
+    except (OSError, http.client.HTTPException, ValueError):
+        return 0, b""
+
+
+def hub_repository(repo: str) -> dict[str, Any]:
+    """What Hugging Face says about the model repository `repo`: its own name and its files.
+
+    Raises Invalid when there is no such public repository, and HubDown when
+    Hugging Face does not answer.
+    """
+    owner, name = repo.split("/")
+    url = f"{HUB_API}{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(name, safe='')}{HUB_QUERY}"
+    for wait in (*HUB_WAITS, None):
+        status, body = _hub_get(url)
+        if status == 200:
+            break
+        # To a stranger, a private repository and one that was never there
+        # both answer 401: either way, nobody can fetch the model from it.
+        if 400 <= status < 500 and status not in (408, 429):
+            raise Invalid("`model.repo` is not a public model on Hugging Face.")
+        if wait is None:
+            raise HubDown(f"Hugging Face did not answer for {repo} (status {status or 'none'}).")
+        time.sleep(wait)
+    if len(body) > HUB_LIMIT:
+        raise Invalid("`model.repo` has more files than the board can check.")
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        raise HubDown(f"Hugging Face described {repo} in something that is not JSON.") from None
+    if not (isinstance(data, dict) and isinstance(data.get("id"), str) and isinstance(data.get("siblings"), list)):
+        raise HubDown(f"Hugging Face described {repo} in a shape the board does not know.")
+    return data
+
+
+def _hub_files(data: dict[str, Any]) -> dict[str, tuple[str, int]]:
+    """Every file of a repository kept in LFS, by its path there: its SHA-256 and size."""
+    files: dict[str, tuple[str, int]] = {}
+    for sibling in data["siblings"]:
+        if not isinstance(sibling, dict):
+            continue
+        path, lfs = sibling.get("rfilename"), sibling.get("lfs")
+        if (isinstance(path, str) and isinstance(lfs, dict) and isinstance(lfs.get("sha256"), str)
+                and _is_int(lfs.get("size"))):
+            files[path] = (lfs["sha256"].lower(), lfs["size"])
+    return files
+
+
+def _model_size(files: dict[str, tuple[str, int]], path: str, name: str) -> int | None:
+    """The size of the model at `path`, all of its parts for a split GGUF; None when a part is missing."""
+    split = SPLIT_RE.fullmatch(name)
+    if not split:
+        return files[path][1]
+    folder, count = path[: len(path) - len(name)], int(split.group(3))
+    parts = [f"{folder}{split.group(1)}-{n:05d}-of-{count:05d}.gguf" for n in range(1, count + 1)]
+    if any(part not in files for part in parts):
+        return None
+    return sum(files[part][1] for part in parts)
+
+
+def check_hub(model: dict[str, Any]) -> None:
+    """Raise Invalid unless `model.repo` is a public model on Hugging Face holding
+    `model.file`, with `model.sha256` as its SHA-256 and `model.bytes` as its size.
+
+    A split GGUF is hashed from its first part, which is the file named, and
+    its size is that of all its parts, which must sit beside the first.
+    """
+    data = hub_repository(model["repo"])
+    # A name in other capitals, or one a repository had before it moved:
+    # Hugging Face still answers for it, under the name it has now.
+    if data["id"] != model["repo"]:
+        raise Invalid("`model.repo` is not the name Hugging Face gives that repository.")
+    if data.get("private") is True or data.get("disabled") is True:
+        raise Invalid("`model.repo` is not a public model on Hugging Face.")
+    files = _hub_files(data)
+    name = model["file"]
+    found = [path for path, (sha256, _size) in files.items()
+             if path.rsplit("/", 1)[-1] == name and sha256 == model["sha256"]]
+    if not found:
+        raise Invalid("`model.repo` on Hugging Face has no `model.file` with that SHA-256.")
+    sizes = [_model_size(files, path, name) for path in found]
+    if model["bytes"] in sizes:
+        return
+    size = next((size for size in sizes if size is not None), None)
+    if size is None:
+        raise Invalid("`model.repo` on Hugging Face is missing a part of `model.file`.")
+    whole = " in all its parts" if SPLIT_RE.fullmatch(name) else ""
+    raise Invalid(f"`model.bytes` is {model['bytes']}, but `model.file` is {size} bytes{whole} on Hugging Face.")
 
 
 # Scores ---------------------------------------------------------------------
@@ -371,12 +506,15 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _write_json(path: Path, data: Any) -> None:
-    text = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(text, encoding="utf-8", newline="\n")
     os.replace(temp, path)
+
+
+def _write_json(path: Path, data: Any) -> None:
+    _write_text(path, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
 
 
 def load_stored(path: Path) -> dict[str, Any]:
@@ -465,14 +603,17 @@ def rebuild(repo_root: Path, now: str | None = None) -> tuple[list[dict[str, Any
     return entries, skipped, write_board(repo_root, entries, now)
 
 
-# Accepting an issue -----------------------------------------------------------
+# Issues -----------------------------------------------------------------------
+# An issue ends up holding the result and nothing else: the board rewrites its
+# title and body from the result once it has decided, and empties an issue that
+# holds none. The workflow then closes and locks it.
 
 
 def find_block(body: str) -> str | None:
     """The text of the first ```json block after the marker line.
 
-    None when the body has no marker line (an ordinary issue). Raises Invalid
-    when the marker is there but no closed block follows it.
+    None when the body has no marker line (an issue that is not a result).
+    Raises Invalid when the marker is there but no closed block follows it.
     """
     lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     start = next((i for i, line in enumerate(lines) if line.strip() == MARKER), None)
@@ -491,6 +632,35 @@ def find_block(body: str) -> str | None:
     raise Invalid(f"There is no `json` code block after the `{MARKER}` line.")
 
 
+def result_title(result: dict[str, Any]) -> str:
+    """A result's issue title, made only of what the result holds."""
+    return f"Result: {result['model']['file']}, {result['size']}"
+
+
+def result_body(result: dict[str, Any]) -> str:
+    """A result's issue body: the marker line and the result, nothing else."""
+    return f"{MARKER}\n```json\n{json.dumps(result, indent=2, sort_keys=True)}\n```\n"
+
+
+def _closed(title: str, body: str, reason: str) -> dict[str, str]:
+    """What an issue becomes once the board has decided, in the fields GitHub's API takes."""
+    return {"title": title, "body": body, "state": "closed", "state_reason": reason}
+
+
+def _issue_of(event: Any) -> dict[str, Any]:
+    issue = event.get("issue") if isinstance(event, dict) else None
+    if not (isinstance(issue, dict) and _is_int(issue.get("number")) and issue["number"] > 0):
+        raise ValueError("the event has no issue number; is it an issues event?")
+    return issue
+
+
+def _login(user: object) -> str | None:
+    """A GitHub user's login in lower case, as GitHub compares them."""
+    if isinstance(user, dict) and isinstance(user.get("login"), str):
+        return user["login"].lower()
+    return None
+
+
 def _repo_link(event: dict[str, Any]) -> tuple[str, str]:
     """The repository's web address and default branch, from GitHub's part of the event."""
     url, branch = FALLBACK_REPO_URL, "main"
@@ -503,12 +673,23 @@ def _repo_link(event: dict[str, Any]) -> tuple[str, str]:
     return url, branch
 
 
-def _decide(out_dir: Path, status: str, message: str, comment: str) -> dict[str, str]:
+def _decide(out_dir: Path, status: str, message: str, comment: str | None = None,
+            issue: dict[str, str] | None = None) -> dict[str, str]:
+    """Write what the workflow acts on. A file with nothing to say is left out."""
     out_dir.mkdir(parents=True, exist_ok=True)
     decision = {"status": status, "message": message}
-    (out_dir / "decision.json").write_text(json.dumps(decision, indent=2) + "\n", encoding="utf-8", newline="\n")
-    (out_dir / "comment.md").write_text(comment, encoding="utf-8", newline="\n")
+    _write_text(out_dir / "decision.json", json.dumps(decision, indent=2) + "\n")
+    for name, content in (("comment.md", comment), ("issue.json", issue)):
+        path = out_dir / name
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            _write_text(path, content if isinstance(content, str) else json.dumps(content, indent=2) + "\n")
     return decision
+
+
+def _other_comment() -> str:
+    return f"This board takes only results from Crucible's Bench tab. Anything else goes to {CRUCIBLE_ISSUES}.\n"
 
 
 def _rejected_comment(reason: str, repo_url: str) -> str:
@@ -542,10 +723,12 @@ def _accepted_comment(
 
 
 def accept_event(event: Any, repo_root: Path, out_dir: Path, now: str | None = None) -> dict[str, str]:
-    """Decide on one `issues` event, store the result if it passes, and write the decision."""
-    issue = event.get("issue") if isinstance(event, dict) else None
-    if not (isinstance(issue, dict) and _is_int(issue.get("number")) and issue["number"] > 0):
-        raise ValueError("the event has no issue number; is it an issues event?")
+    """Decide on one newly opened issue, store the result if it passes, and write the decision.
+
+    Raises HubDown when Hugging Face does not answer, so that the run fails
+    and can be run again rather than turn a good result away.
+    """
+    issue = _issue_of(event)
     number = issue["number"]
     body = issue.get("body")
     repo_url, branch = _repo_link(event)
@@ -553,18 +736,20 @@ def accept_event(event: Any, repo_root: Path, out_dir: Path, now: str | None = N
     try:
         block = find_block(body if isinstance(body, str) else "")
         if block is None:
-            return _decide(out_dir, "ignored", f"No {MARKER} line, so this is an ordinary issue.", "")
+            return _decide(out_dir, "other", f"No {MARKER} line, so this is not a result.",
+                           _other_comment(), _closed(NOT_A_RESULT_TITLE, "", "not_planned"))
         result = parse_json(block, "The `json` code block")
         validate(result)
+        check_hub(result["model"])
     except Invalid as err:
         reason = str(err)
-        return _decide(out_dir, "rejected", reason, _rejected_comment(reason, repo_url))
+        return _decide(out_dir, "rejected", reason, _rejected_comment(reason, repo_url),
+                       _closed(NOT_ACCEPTED_TITLE, "", "not_planned"))
 
-    user = issue.get("user")
     stored = dict(result)
     stored["posted"] = {
         "issue": number,
-        "user": user.get("login") if isinstance(user, dict) else None,
+        "user": issue["user"].get("login") if isinstance(issue.get("user"), dict) else None,
         "url": issue.get("html_url"),
         "at": issue.get("created_at"),
     }
@@ -585,7 +770,35 @@ def accept_event(event: Any, repo_root: Path, out_dir: Path, now: str | None = N
     older = [i for i in same if i < number]
     newer = [i for i in same if i > number]
     comment = _accepted_comment(number, result, older, newer, repo_url, branch)
-    return _decide(out_dir, "accepted", f"Accepted as results/{number}.json.", comment)
+    return _decide(out_dir, "accepted", f"Accepted as results/{number}.json.", comment,
+                   _closed(result_title(result), result_body(result), "completed"))
+
+
+def restore_event(event: Any, repo_root: Path, out_dir: Path) -> dict[str, str]:
+    """Undo an edit to an issue the board has closed: write the title and body it left there.
+
+    Only an edit by the issue's own author is undone, and only once the board
+    has closed the issue: until then the accept run is still deciding, and it
+    rewrites the issue from what was opened, whatever was edited meanwhile.
+    """
+    issue = _issue_of(event)
+    number = issue["number"]
+    if issue.get("state") != "closed":
+        return _decide(out_dir, "unchanged", "The issue is open, so the accept run has yet to rewrite it.")
+    editor = _login(event.get("sender"))
+    if editor is None or editor != _login(issue.get("user")):
+        return _decide(out_dir, "unchanged", "Edited by someone other than its author.")
+    try:
+        stored = load_stored(repo_root / "results" / f"{number}.json")
+    except Invalid:
+        labels = issue.get("labels") if isinstance(issue.get("labels"), list) else []
+        rejected = any(isinstance(label, dict) and label.get("name") == REJECTED_LABEL for label in labels)
+        title = NOT_ACCEPTED_TITLE if rejected else NOT_A_RESULT_TITLE
+        return _decide(out_dir, "restored", f"Emptied again, as {title.lower()}.",
+                       issue={"title": title, "body": ""})
+    result = {key: value for key, value in stored.items() if key != "posted"}
+    return _decide(out_dir, "restored", f"Put back as results/{number}.json.",
+                   issue={"title": result_title(result), "body": result_body(result)})
 
 
 # Command line -----------------------------------------------------------------
@@ -594,19 +807,22 @@ def accept_event(event: Any, repo_root: Path, out_dir: Path, now: str | None = N
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check results posted to the crucible-bench board, and build board.json.")
     commands = parser.add_subparsers(dest="command", required=True)
-    accept_cmd = commands.add_parser("accept", help="check the result in a GitHub issues event")
-    accept_cmd.add_argument("event", type=Path, help="the event payload, such as $GITHUB_EVENT_PATH")
-    accept_cmd.add_argument("repo_root", type=Path, help="the board repository")
-    accept_cmd.add_argument("out_dir", type=Path, help="where decision.json and comment.md go")
+    for command, help_text in (("accept", "check the result in a GitHub issues event for a new issue"),
+                               ("restore", "put back an issue the board closed, after its author edited it")):
+        sub = commands.add_parser(command, help=help_text)
+        sub.add_argument("event", type=Path, help="the event payload, such as $GITHUB_EVENT_PATH")
+        sub.add_argument("repo_root", type=Path, help="the board repository")
+        sub.add_argument("out_dir", type=Path, help="where decision.json, comment.md and issue.json go")
     rebuild_cmd = commands.add_parser("rebuild", help="build board.json again from results/")
     rebuild_cmd.add_argument("repo_root", type=Path, help="the board repository")
     args = parser.parse_args(argv)
 
-    if args.command == "accept":
+    if args.command in ("accept", "restore"):
+        decide = accept_event if args.command == "accept" else restore_event
         try:
             event = json.loads(args.event.read_text(encoding="utf-8"))
-            decision = accept_event(event, args.repo_root, args.out_dir)
-        except (OSError, ValueError) as err:
+            decision = decide(event, args.repo_root, args.out_dir)
+        except (OSError, ValueError, HubDown) as err:
             print(f"error: {err}", file=sys.stderr)
             return 1
         print(f"{decision['status']}: {decision['message']}")
