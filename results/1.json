@@ -1,0 +1,77 @@
+{
+  "benchmarks": {
+    "arc": {
+      "correct": 48,
+      "n": 50
+    },
+    "gsm8k": {
+      "correct": 42,
+      "n": 50
+    },
+    "hellaswag": {
+      "correct": 24,
+      "n": 50
+    },
+    "humaneval": {
+      "correct": 31,
+      "n": 50
+    },
+    "ifeval": {
+      "correct": 43,
+      "n": 50
+    },
+    "math500": {
+      "correct": 28,
+      "n": 50
+    },
+    "mbpp": {
+      "correct": 21,
+      "n": 50
+    },
+    "mmlu_pro": {
+      "correct": 15,
+      "n": 50
+    },
+    "truthfulqa": {
+      "correct": 26,
+      "n": 50
+    }
+  },
+  "crucible": "0.9.5",
+  "date": "2026-10-26",
+  "hardware": {
+    "backend": "CUDA",
+    "gpu_count": 1,
+    "memory_gb": 16.7
+  },
+  "llama": "b11846",
+  "model": {
+    "arch": "lfm2",
+    "bytes": 1246255456,
+    "file": "LFM2.5-1.2B-Instruct-Q8_0.gguf",
+    "params": 1170340608,
+    "quant": "Q8_0",
+    "repo": "lmstudio-community/LFM2.5-1.2B-Instruct-GGUF",
+    "sha256": "c40c8a9239dbc2d8874c5508110b9b1f3d325376eecffdba7bce2dcb49a0207c"
+  },
+  "posted": {
+    "at": "2026-10-26T16:07:10Z",
+    "issue": 1,
+    "url": "https://github.com/mattsaund/crucible-bench/issues/1",
+    "user": "mattsaund"
+  },
+  "schema": 1,
+  "seconds": 766,
+  "settings": {
+    "context": 20480,
+    "effort": "default",
+    "max_tokens": 16384,
+    "temperature": 0
+  },
+  "size": "quick",
+  "speed": {
+    "gen_tps": 255.9,
+    "prompt_tps": 23313.0
+  },
+  "suite": "crucible-bench-1"
+}
