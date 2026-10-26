@@ -37,7 +37,7 @@ What it does pin down is the model. `model.sha256` is the SHA-256 of the whole G
 
 The datasets are not part of this repository: Crucible reads the rows from Hugging Face's datasets server. See each dataset card for its license.
 
-Each item is asked as a chat with one user message. The model answers in its own words (it may think first) with greedy decoding (temperature 0), and the answer is read from its final text:
+Each item is asked as a chat with one user message, worded as in Crucible's [`bench.py`](https://github.com/mattsaund/Crucible/blob/main/scripts/orchestrator/crucible_orchestrator/bench.py). The model answers in its own words (it may think first) with greedy decoding (temperature 0), and the answer is read from its final text:
 
 - MMLU-Pro, ARC-Challenge and HellaSwag: the letter of a choice (A to J for `options`, one of `choices.label`, A to D for `endings`), compared with `answer`, `answerKey` or `label`.
 - TruthfulQA: the letter of one of `mc1_targets.choices`, shown shuffled (see below). The right one is the choice labeled 1.
