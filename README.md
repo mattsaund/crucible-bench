@@ -37,7 +37,7 @@ What it does pin down is the model. `model.sha256` is the SHA-256 of the whole G
 
 The datasets are not part of this repository: Crucible reads the rows from Hugging Face's datasets server. See each dataset card for its license.
 
-Each item is asked as a chat with one user message, worded as in Crucible's [`bench.py`](https://github.com/mattsaund/Crucible/blob/main/scripts/orchestrator/crucible_orchestrator/bench.py). The model answers in its own words (it may think first) with greedy decoding (temperature 0), and the answer is read from its final text:
+Each item is asked as a chat with one user message, worded as in Crucible's [`bench.py`](https://github.com/mattsaund/Crucible/blob/main/scripts/orchestrator/crucible_orchestrator/bench.py). The model answers in its own words with greedy decoding (temperature 0). A reply may run to 16384 tokens in a 20480-token context, room for a model that thinks first. A model too large to load with that much context gets 4096 tokens in 8192 instead, and its `settings` say so. The answer is read from the reply's final text:
 
 - MMLU-Pro, ARC-Challenge and HellaSwag: the letter of a choice (A to J for `options`, one of `choices.label`, A to D for `endings`), compared with `answer`, `answerKey` or `label`.
 - TruthfulQA: the letter of one of `mc1_targets.choices`, shown shuffled (see below). The right one is the choice labeled 1.
@@ -103,7 +103,7 @@ A result as Crucible posts it:
     "quant": "Q6_K",
     "repo": "unsloth/flint-GGUF"
   },
-  "settings": {"context": 8192, "max_tokens": 4096, "temperature": 0, "effort": "default"},
+  "settings": {"context": 20480, "max_tokens": 16384, "temperature": 0, "effort": "default"},
   "hardware": {"backend": "CUDA", "gpus": ["NVIDIA GeForce RTX 4070"], "memory_gb": 40.2},
   "benchmarks": {
     "mmlu_pro": {"n": 50, "correct": 31},
@@ -155,7 +155,7 @@ Every Crucible reads <https://raw.githubusercontent.com/mattsaund/crucible-bench
       "posted": {"at": "2026-10-26T18:03:52Z", "issue": 12, "url": "https://github.com/mattsaund/crucible-bench/issues/12", "user": "octocat"},
       "schema": 1,
       "scores": {"gsm8k": 0.88, "mmlu_pro": 0.62},
-      "settings": {"context": 8192, "effort": "default", "max_tokens": 4096, "temperature": 0},
+      "settings": {"context": 20480, "effort": "default", "max_tokens": 16384, "temperature": 0},
       "size": "quick",
       "skills": {"knowledge": 0.62, "math": 0.88},
       "suite": "crucible-bench-1"
